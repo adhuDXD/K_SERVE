@@ -1,0 +1,841 @@
+================================================================================
+           KSERVE COLLEGE MANAGEMENT SYSTEM - COMPLETE FUNCTION REFERENCE
+            All Functions, Algorithms & Logic - Detailed Technical Guide
+================================================================================
+Generated: 2026-04-10
+Project: Kserve | Backend: FastAPI + SQLAlchemy | DB: SQLite/PostgreSQL
+================================================================================
+
+
+================================================================================
+  FILE: auth.py  (Root Authentication Utilities)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 1: create_access_token(data: dict, expires_delta: Optional[timedelta])
+--------------------------------------------------------------------------------
+PURPOSE:
+  Generates a signed JSON Web Token (JWT) for authenticating API requests.
+
+ALGORITHM / STEPS:
+  1. Copy the input 'data' dictionary (shallow copy) to avoid mutation.
+  2. Determine token expiry:
+       - If expires_delta is provided, set expiry = current UTC time + expires_delta
+       - Else, default expiry = current UTC time + 15 minutes
+  3. Append the 'exp' (expiry epoch) field to the payload dictionary.
+  4. Encode the payload using:
+       - Algorithm: HS256 (HMAC with SHA-256)
+         * A symmetric signing algorithm — same key used to sign and verify.
+         * SHA-256 hash is computed over the header + payload, signed with SECRET_KEY.
+       - Library: python-jose (JWT standard)
+  5. Return the encoded JWT string (format: header.payload.signature in Base64).
+
+ALGORITHM USED:
+  - HMAC-SHA256 (HS256) for JWT signing
+  - Base64URL encoding for token serialization
+  - UTC timestamp comparison for expiry logic
+
+SECURITY NOTES:
+  - SECRET_KEY is loaded from environment variable for production safety.
+  - Dev fallback: "DEV_SECRET_KEY_CHANGE_IN_PRODUCTION"
+  - Token is valid for ACCESS_TOKEN_EXPIRE_MINUTES = 1440 minutes (24 hours)
+
+--------------------------------------------------------------------------------
+FUNCTION 2: get_current_user(token: str, db: Session)
+--------------------------------------------------------------------------------
+PURPOSE:
+  FastAPI dependency that decodes a JWT Bearer token and retrieves the
+  corresponding user from the database.
+
+ALGORITHM / STEPS:
+  1. Receive Bearer token from Authorization header via OAuth2PasswordBearer.
+  2. Attempt to decode the JWT:
+       - Algorithm: HS256 (HMAC-SHA256)
+       - Verify signature using SECRET_KEY
+       - Check expiry ('exp' claim) automatically by python-jose
+  3. Extract 'sub' (subject = username) from the payload.
+  4. If 'sub' is None or JWT decoding fails → raise HTTP 401 Unauthorized.
+  5. Query the database for the User matching the extracted username.
+  6. If user not found → raise HTTP 401 Unauthorized.
+  7. Return the User ORM object.
+
+ALGORITHM USED:
+  - JWT Signature Verification (HMAC-SHA256)
+  - Expiry validation using epoch timestamps
+
+--------------------------------------------------------------------------------
+FUNCTION 3: get_current_active_user(current_user: User)
+--------------------------------------------------------------------------------
+PURPOSE:
+  An additional security guard that ensures the authenticated user's account
+  is not blocked or unapproved.
+
+ALGORITHM / STEPS:
+  1. Accept the result of get_current_user as a dependency.
+  2. Check if current_user.is_active == False.
+  3. If inactive → raise HTTP 400 "Account is blocked or unapproved."
+  4. Else → return current_user.
+
+ALGORITHM USED:
+  - Simple Boolean gate check (role-based access control guard)
+
+
+================================================================================
+  FILE: database.py  (Database Connection & Session Management)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 4: get_db()
+--------------------------------------------------------------------------------
+PURPOSE:
+  Provides a SQLAlchemy database session to each API request via
+  FastAPI's dependency injection. Ensures sessions are properly closed.
+
+ALGORITHM / STEPS:
+  1. Open a new database session using SessionLocal().
+  2. Yield the session to the calling route (dependency injection pattern).
+  3. On request completion (success or exception), close the session
+     in the 'finally' block to prevent connection leaks.
+
+ALGORITHM USED:
+  - Generator-based Dependency Injection (Python yield pattern)
+  - Resource management via try/finally (RAII pattern)
+  - Connection Pooling via SQLAlchemy's SessionLocal (autocommit=False, autoflush=False)
+
+NOTES:
+  - SQLite is used for local dev (check_same_thread=False for threading)
+  - PostgreSQL is used in production (no special args required)
+  - DATABASE_URL is read from environment variables
+
+
+================================================================================
+  FILE: id_generator.py  (Atomic ID Generation)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 5: get_next_sequence_number(db, prefix, year, dept_code) -> int
+--------------------------------------------------------------------------------
+PURPOSE:
+  Atomically fetches and increments a sequence counter for a
+  given (prefix, year, department) combination. Prevents duplicate IDs
+  even in concurrent request scenarios.
+
+ALGORITHM / STEPS:
+  1. Construct lookup key: e.g. "FAC-25-EC" or "URK-25-CS"
+  2. Query the IdSequence table for this key using SELECT FOR UPDATE
+     (database-level row lock — prevents race conditions in concurrent writes).
+  3. If no record exists:
+       a. Create new IdSequence(key=key, last_value=1)
+       b. Commit and return 1
+  4. If record found:
+       a. Increment last_value by 1 atomically
+       b. Commit and return the new value
+  5. On exception: rollback and re-raise
+
+ALGORITHM USED:
+  - Pessimistic Locking via SELECT FOR UPDATE (Atomic Counter Pattern)
+  - In SQLite: table-level lock (simulated); in PostgreSQL: row-level lock
+  - Sequential Integer Generation with persistence in DB
+
+CONCURRENCY SAFETY:
+  PostgreSQL: True row-level locking (concurrent requests safely serialized)
+  SQLite: Full table-lock (safe but reduces concurrency)
+
+--------------------------------------------------------------------------------
+FUNCTION 6: generate_faculty_id(db, dept_id, join_date) -> str
+--------------------------------------------------------------------------------
+PURPOSE:
+  Generates a unique human-readable Faculty ID in the format:
+  FAC + YY + DEPT_CODE + NNN  (e.g. FAC25EC001)
+
+ALGORITHM / STEPS:
+  1. Query Department table for dept_id → get department code (e.g., "EC")
+  2. Extract 2-digit year from join_date.year (e.g., 2025 → "25")
+  3. Call get_next_sequence_number(db, "FAC", yy, dept_code) → get N
+  4. Zero-pad N to 3 digits using Python format spec {:03d}
+  5. Concatenate: "FAC" + yy + dept_code + padded_N → return final ID
+
+ALGORITHM USED:
+  - String Formatting / Zero-padding
+  - Atomic Sequence Counter (via get_next_sequence_number)
+  - Foreign Key Lookup for department code
+
+EXAMPLE:
+  Department: EC, Year: 2025, Sequence: 5 → "FAC25EC005"
+
+--------------------------------------------------------------------------------
+FUNCTION 7: generate_student_id(db, dept_id, join_year) -> str
+--------------------------------------------------------------------------------
+PURPOSE:
+  Generates a unique Student ID in the format:
+  URK + YY + DEPT_CODE + NNN  (e.g. URK25EC001)
+
+ALGORITHM / STEPS:
+  1. Query Department table for dept_id → get department code
+  2. Extract 2-digit year from join_year integer (e.g., 2025 → "25")
+  3. Call get_next_sequence_number(db, "URK", yy, dept_code) → get N
+  4. Zero-pad N to 3 digits
+  5. Concatenate: "URK" + yy + dept_code + padded_N → return
+
+ALGORITHM USED:
+  - Same as generate_faculty_id (Atomic Sequence + String Formatting)
+
+EXAMPLE:
+  Department: CS, Year: 2025, Sequence: 12 → "URK25CS012"
+
+
+================================================================================
+  FILE: routers/auth.py  (Authentication API Router)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 8: login(username, password, db) -> dict
+  Route: POST /api/auth/login
+--------------------------------------------------------------------------------
+PURPOSE:
+  Authenticates a user (Admin, HOD, or Faculty) and returns a JWT bearer token.
+
+ALGORITHM / STEPS:
+  1. SANDBOX ADMIN CHECK:
+       - If username.lower() == "admin" AND password == "admin"
+       - Skip DB lookup, directly mint a JWT with role=ADMIN → return
+  2. SANDBOX HOD CHECK:
+       - If username.lower() == "hod" AND password == "hod"
+       - Skip DB lookup, mint JWT with role=HOD → return
+  3. FACULTY/REAL LOGIN:
+       a. Query User table for matching username
+       b. If not found → HTTP 401 "Invalid Credentials"
+       c. Verify password using Bcrypt hash comparison:
+            - pwd_context.verify(plaintext, stored_hash)
+            - Bcrypt internally uses salt + cost factor to compare
+       d. If hash mismatch → HTTP 401
+       e. If user.is_active == False → HTTP 403 (account not approved)
+       f. Create access token with expiry of ACCESS_TOKEN_EXPIRE_MINUTES
+       g. Return {access_token, token_type: "bearer", role}
+
+ALGORITHM USED:
+  - Bcrypt Password Verification (Adaptive Hashing)
+    * Bcrypt uses a random salt (stored in hash) + cost factor (work factor)
+    * Work factor makes brute forcing computationally expensive
+    * passlib CryptContext handles salt extraction and comparison automatically
+  - JWT Generation (HMAC-SHA256) — see create_access_token
+  - Guard clause / early return pattern for sandbox stubs
+
+
+================================================================================
+  FILE: routers/onboarding.py  (Faculty Self-Registration)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 9: faculty_signup(...) -> FacultySignupResponse
+  Route: POST /api/onboarding/faculty/signup
+--------------------------------------------------------------------------------
+PURPOSE:
+  Allows a new faculty member to self-register. Their account is created
+  with is_active=False (blocked until Admin approves).
+
+ALGORITHM / STEPS:
+  1. VALIDATE DEPARTMENT:
+       - Query Department by department_id → 404 if not found
+  2. GENERATE FACULTY ID:
+       - Call generate_faculty_id(db, department_id, join_date)
+       - Atomic read-increment-write lock ensures no race condition
+  3. SAVE BIOMETRIC PHOTO:
+       - Extract file extension from uploaded filename
+       - Build safe filename: "{faculty_id}_bio.{ext}"
+       - Write binary file to "static/uploads/biometrics/" using shutil.copyfileobj
+       - Streaming write algorithm: reads source buffer → writes chunks to disk
+  4. HASH PASSWORD:
+       - Hash using Bcrypt (pwd_context.hash(password))
+       - Bcrypt: generates random 22-char salt, applies 2^cost rounds of Blowfish
+  5. CREATE USER ACCOUNT:
+       - username = faculty_id (auto-generated)
+       - is_active = False (pending approval)
+       - db.flush() to get auto-incremented user.id without committing
+  6. CREATE FACULTY PROFILE:
+       - Link to user via user_id
+       - Set status = PENDING
+  7. COMMIT TRANSACTION → return success message with pending faculty_id
+
+ALGORITHM USED:
+  - Bcrypt Adaptive Hashing (password storage)
+  - Atomic ID Generation (see generate_faculty_id)
+  - Multi-step DB Transaction with flush (for FK dependency resolution)
+  - File I/O: Streaming binary copy to disk
+
+
+================================================================================
+  FILE: routers/admin.py  (Admin Panel API)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 10: get_pending_faculties(db) -> list
+  Route: GET /api/admin/pending-faculties
+--------------------------------------------------------------------------------
+PURPOSE:
+  Lists all faculty profiles awaiting admin approval.
+
+ALGORITHM / STEPS:
+  1. Query FacultyProfile WHERE status == StatusEnum.PENDING
+  2. Map each profile to a dictionary with key attributes
+  3. Return list of dicts
+
+ALGORITHM USED:
+  - Simple SQL Filtered Query (single table scan with WHERE clause)
+  - Python list comprehension for serialization
+
+--------------------------------------------------------------------------------
+FUNCTION 11: verify_faculty(faculty_id, payload, db) -> dict
+  Route: POST /api/admin/verify-faculty/{faculty_id}
+--------------------------------------------------------------------------------
+PURPOSE:
+  Admin approves or rejects a pending faculty application.
+
+ALGORITHM / STEPS:
+  1. Look up FacultyProfile by faculty_id string → 404 if not found
+  2. Check profile.status == PENDING → 400 if already processed
+  3. Validate payload.action:
+       - "REJECT" requires non-empty reason field → 400 if missing
+  4. If APPROVE:
+       - profile.status = ACTIVE
+       - linked user.is_active = True (enables login)
+  5. If REJECT:
+       - profile.status = REJECTED
+       - user.is_active remains False
+  6. Write AuditLog entry with action name, faculty_id, reason
+  7. db.commit() → return success message
+
+ALGORITHM USED:
+  - State Machine Pattern (PENDING → ACTIVE/REJECTED)
+  - Referential integrity: User and FacultyProfile updated in one transaction
+  - Audit Logging for traceability
+
+--------------------------------------------------------------------------------
+FUNCTION 12: create_department(payload, db) -> dict
+  Route: POST /api/admin/departments
+--------------------------------------------------------------------------------
+PURPOSE:
+  Creates a new academic department. The department code feeds into
+  the ID generator for faculty and student ID creation.
+
+ALGORITHM / STEPS:
+  1. Validate: department code length must be ≤ 4 characters
+  2. Check uniqueness: query Department WHERE code == payload.code.upper()
+     → 400 if already exists
+  3. Create Department(code=uppercase, full_name)
+  4. db.flush() → get DB-assigned ID
+  5. Write AuditLog entry
+  6. db.commit() → return ID
+
+ALGORITHM USED:
+  - Uniqueness Constraint Check (DB-level + application-level double guard)
+  - String normalization (uppercase conversion before storage)
+
+--------------------------------------------------------------------------------
+FUNCTION 13: get_departments(db) -> list
+  Route: GET /api/admin/departments
+--------------------------------------------------------------------------------
+PURPOSE:
+  Returns all departments.
+
+ALGORITHM: Full Table Scan → list comprehension serialization.
+
+--------------------------------------------------------------------------------
+FUNCTION 14: import_faculty_dataset(file, db) -> dict
+  Route: POST /api/admin/import-faculty
+--------------------------------------------------------------------------------
+PURPOSE:
+  Bulk imports faculty data from a CSV or XLSX dataset file.
+  Auto-generates usernames (= full_name) and passwords (= join_date string).
+
+ALGORITHM / STEPS:
+  1. VALIDATE FILE TYPE:
+       - Check filename ends with .csv or .xlsx → 400 otherwise
+  2. READ FILE INTO MEMORY:
+       - For CSV: decode using utf-8-sig (handles BOM), parse via csv.DictReader
+       - For XLSX: use pandas.read_excel with dtype=str (preserve leading zeros),
+                   fillna("") for empty cells, convert to list of dicts
+  3. NORMALIZE COLUMN KEYS:
+       - Strip all key whitespace (handles trailing spaces in column names)
+  4. VALIDATE REQUIRED COLUMNS:
+       Check for: Name, Department, Designation, Total Teaching Experience,
+                  DOJ, DOB, Gender, Qualification
+  5. PER-ROW PROCESSING (loop):
+       a. Extract and strip full_name; skip if empty
+       b. DUPLICATE CHECK: Query User WHERE username == full_name → skip if exists
+       c. DEPARTMENT RESOLUTION:
+            - Case-insensitive match against Department.code OR Department.full_name
+            - Uses SQLAlchemy func.upper() for DB-level case folding
+       d. DATE PARSING (parse_date sub-function):
+            - Strip time portion (split on ' ')[0]
+            - Detect separator: '-' or '/'
+            - Heuristic: if parts[0] length == 4 → YYYY-MM-DD format
+                         if parts[2] length == 4 → DD-MM-YYYY format
+            - Fallback: date.fromisoformat()
+            - Raises ValueError on unrecognized format
+       e. GENERATE FACULTY ID: generate_faculty_id(db, dept.id, join_date)
+       f. HASH PASSWORD: pwd_context.hash(str(join_date))  [Bcrypt]
+       g. CREATE User (is_active=True, role=FACULTY) → db.flush()
+       h. safe_int() helper: safely cast float strings to int (handles "2.0" → 2)
+       i. CREATE FacultyProfile with all mapped columns → db.flush()
+       j. Append to imported[] list on success
+       k. On exception: db.rollback(), append to failed[], continue next row
+  6. Final db.commit() for all successfully processed rows
+  7. Return summary with imported count, failed count, and details
+
+ALGORITHM USED:
+  - Multi-format File Parsing (CSV via stdlib, XLSX via Pandas)
+  - Heuristic Date Parsing (pattern matching on separators and part lengths)
+  - Case-Insensitive String Matching (DB func.upper normalization)
+  - Row-by-row Transaction with Partial Rollback on Failure
+  - Bcrypt Password Hashing
+  - Atomic ID Generation (per row)
+
+NESTED HELPER: parse_date(d_str)
+  - Strips whitespace and time-of-day portions
+  - Pattern: contains '-' → split and check part[0] or part[2] length for year
+  - Pattern: contains '/' → assume DD/MM/YYYY
+  - Fallback: try date.fromisoformat()
+
+NESTED HELPER: safe_int(val)
+  - Converts any value to int via float conversion (handles "2.0" strings)
+  - Returns 0 on any exception (graceful degradation)
+
+--------------------------------------------------------------------------------
+FUNCTION 15: list_all_faculties(db) -> list
+  Route: GET /api/admin/faculties
+--------------------------------------------------------------------------------
+PURPOSE:
+  Returns all faculty profiles with department name joined.
+
+ALGORITHM:
+  - Full table scan on FacultyProfile
+  - Per-row secondary lookup for Department (N+1 query pattern)
+  - Serialization to dict list
+
+--------------------------------------------------------------------------------
+FUNCTION 16: export_attendance_csv(db) -> StreamingResponse
+  Route: GET /api/admin/export-attendance
+--------------------------------------------------------------------------------
+PURPOSE:
+  Exports all ClassAttendance records as a CSV file download.
+
+ALGORITHM / STEPS:
+  1. Fetch all ClassAttendance records (full table scan)
+  2. For each record, lookup linked Student (secondary query)
+  3. Build list of dictionaries with: Date, Period, Slot ID, Student Name, URK ID, Status, Method
+  4. Create a Pandas DataFrame from the list
+  5. Serialize to CSV using df.to_csv() into an in-memory StringIO buffer
+  6. Wrap buffer in StreamingResponse with:
+       - media_type = "text/csv"
+       - Content-Disposition header = attachment filename
+
+ALGORITHM USED:
+  - In-Memory CSV Serialization (Pandas + StringIO streaming)
+  - HTTP Streaming Response (avoids loading full file into response body)
+
+--------------------------------------------------------------------------------
+FUNCTION 17: create_announcement(payload, db) -> dict
+  Route: POST /api/admin/announcement
+--------------------------------------------------------------------------------
+PURPOSE:
+  Creates an announcement that can be global or department-targeted.
+
+ALGORITHM / STEPS:
+  1. Create Announcement object with title, content, target_department_id
+     - target_department_id = None means global (all departments)
+  2. db.flush() to get ID for audit log
+  3. Write AuditLog → db.commit()
+
+ALGORITHM USED:
+  - Nullable FK Pattern (None = broadcast / department-specific)
+
+--------------------------------------------------------------------------------
+FUNCTION 18: create_student(payload, db) -> dict
+  Route: POST /api/admin/students
+--------------------------------------------------------------------------------
+PURPOSE:
+  Registers a single student with a URK ID and barcode in the system.
+
+ALGORITHM / STEPS:
+  1. Check uniqueness of urk_id → 400 if duplicate
+  2. Determine barcode:
+       - Use payload.barcode if provided (stripped)
+       - Else, default to payload.urk_id (barcode = URK ID)
+  3. Check uniqueness of barcode → 400 if duplicate
+  4. Create Student object with uppercase URK ID
+  5. db.commit() → return barcode
+
+ALGORITHM USED:
+  - Uniqueness Constraint Double-check (app + DB layer)
+  - Default value fallback (barcode = urk_id if none provided)
+
+--------------------------------------------------------------------------------
+FUNCTION 19: get_students(db) -> list
+  Route: GET /api/admin/students
+--------------------------------------------------------------------------------
+PURPOSE:
+  Fetches all registered students with department info.
+
+ALGORITHM:
+  - Full table scan on Student
+  - Per-row secondary lookup for Department
+  - List comprehension serialization
+
+
+================================================================================
+  FILE: routers/hod.py  (Head of Department API)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 20: upload_students_csv(year_of_study, department_id, csv_file, db)
+  Route: POST /api/hod/upload-students
+--------------------------------------------------------------------------------
+PURPOSE:
+  HOD uploads a CSV to bulk-register students for their department and year.
+
+ALGORITHM / STEPS:
+  1. VALIDATE FILE TYPE: must end with .csv → 400 otherwise
+  2. VALIDATE DEPARTMENT: query Department by ID → 404 if not found
+  3. READ CSV FROM MEMORY:
+       - content = await csv_file.read() (async binary read)
+       - pd.read_csv(io.BytesIO(content)) → parse into Pandas DataFrame
+  4. NORMALIZE COLUMNS: df.columns.str.strip() (remove accidental whitespace)
+  5. VALIDATE REQUIRED COLUMNS: {"Name", "Phone", "ParentName"} must be present
+  6. PER-ROW LOOP (df.iterrows()):
+       a. Extract and strip: name, phone, parent_name
+       b. Generate URK ID: generate_student_id(db, department_id, current_year)
+       c. Set barcode = urk_id (barcode is the URK ID itself)
+       d. Create Student ORM object, db.add()
+       e. Increment success_count
+  7. Write AuditLog for bulk upload
+  8. db.commit() as single batch transaction → return count
+
+ALGORITHM USED:
+  - CSV Parsing via Pandas (in-memory BytesIO stream)
+  - Atomic Sequential ID Generation per row
+  - Transactional Batch Insert (all-or-nothing commit)
+  - Pandas DataFrame Iteration (iterrows)
+
+--------------------------------------------------------------------------------
+FUNCTION 21: assign_timetable_slot(payload, db) -> dict
+  Route: POST /api/hod/assign-timetable
+--------------------------------------------------------------------------------
+PURPOSE:
+  HOD assigns a specific teaching slot (subject/day/period) to a faculty member.
+
+ALGORITHM / STEPS:
+  1. Look up FacultyProfile by faculty_string_id → 404 if not found
+  2. Create TimetableSlot: links faculty_user_id, department_id, year, subject, day, period
+  3. Write AuditLog → db.commit() → return success
+
+ALGORITHM USED:
+  - Foreign Key Chaining (FacultyProfile → user_id → TimetableSlot)
+  - Timetable grid model: day_of_week (0-6) × period (1-8)
+
+--------------------------------------------------------------------------------
+FUNCTION 22: assign_substitute(leave_id, sub_faculty_id, slot_id, date, db)
+  Route: POST /api/hod/assign-substitute
+--------------------------------------------------------------------------------
+PURPOSE:
+  HOD approves a leave application and assigns a substitute faculty member.
+
+ALGORITHM / STEPS:
+  1. Look up LeaveApplication by leave_id → 404 if not found
+  2. Set leave.status = "APPROVED"
+  3. Parse date string using datetime.strptime(date, "%Y-%m-%d").date()
+  4. Create SubstituteAssignment linking leave, original, substitute, slot, date
+  5. db.commit() → return success
+
+ALGORITHM USED:
+  - State Transition: LeaveApplication PENDING → APPROVED
+  - Date Parsing: strptime with strict format string
+  - Referential Assignment (Many-to-Many bridge table pattern)
+
+
+================================================================================
+  FILE: routers/attendance.py  (Student & Faculty Attendance API)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 23: generate_daily_attendance_lists(payload, db) -> dict
+  Route: POST /api/attendance/generate-daily
+--------------------------------------------------------------------------------
+PURPOSE:
+  Pre-generates empty (ABSENT) attendance placeholder rows for all students
+  scheduled for a given day's timetable. Intended to be called by a CRON job
+  at midnight automatically (also exposed as API for manual invocation).
+
+ALGORITHM / STEPS:
+  1. Get day_of_week from target_date.weekday() (0=Monday ... 6=Sunday)
+  2. Query all TimetableSlots WHERE day_of_week == that day
+  3. For each slot:
+       a. Query all Students WHERE department_id == slot.department_id
+                                 AND year_of_study == slot.year_of_study
+       b. For each student in that dept/year:
+            - Check if ClassAttendance record already exists for (date, slot_id, student_id)
+            - If NOT exists: create new ClassAttendance with status="ABSENT", is_marked=False
+            - db.add(record)
+  4. db.commit() → return count of generated records
+
+ALGORITHM USED:
+  - Day-of-Week Mapping via Python datetime.weekday()
+  - Nested Loop: Slot × Student (Cartesian match for timetable)
+  - Idempotent Record Creation (existence check before insert prevents duplication)
+  - Bulk Insert with single commit (batch writes for performance)
+
+COMPLEXITY:
+  O(S × D) where S = slots for the day, D = students per slot's dept/year
+
+--------------------------------------------------------------------------------
+FUNCTION 24: scan_student_barcode(payload, current_faculty, db) -> dict
+  Route: POST /api/attendance/scan
+--------------------------------------------------------------------------------
+PURPOSE:
+  Marks a student as PRESENT when their barcode is scanned by faculty
+  during class. Supports both pre-generated and on-the-fly attendance records.
+
+ALGORITHM / STEPS:
+  1. AUTHENTICATE: Requires valid JWT (get_current_active_user dependency)
+  2. BARCODE LOOKUP: Query Student WHERE Student.barcode == payload.barcode
+       - If not found → HTTP 404 "Student barcode not registered"
+  3. ATTENDANCE RECORD LOOKUP:
+       Query ClassAttendance WHERE date=payload.date, slot_id=payload.slot_id,
+                                   student_id=stu.id
+  4. DYNAMIC FALLBACK:
+       If no record found (generate-daily wasn't run):
+         - Dynamically create a new ClassAttendance record with status=ABSENT
+         - db.add() (not yet committed)
+  5. EVENT EXCUSED CHECK:
+       If record.status == "EVENT_EXCUSED" → HTTP 400 (student on event duty)
+  6. MARK PRESENT:
+       - record.status = "PRESENT"
+       - record.marked_method = "SCAN"
+       - record.is_marked = True
+  7. db.commit() → return student name + confirmation
+
+ALGORITHM USED:
+  - Barcode-based Lookup (indexed column query — O(log N) with B-tree index)
+  - Lazy/Dynamic Record Creation (sandbox resilience pattern)
+  - Status Machine: ABSENT → PRESENT (with EVENT_EXCUSED guard)
+  - JWT Bearer Authentication guard
+
+INDEX OPTIMIZATION:
+  Student.barcode has a DB index → fast O(log N) lookup even for large datasets
+
+--------------------------------------------------------------------------------
+FUNCTION 25: mark_faculty_biometric(current_faculty, db) -> dict
+  Route: POST /api/attendance/faculty-biometric
+--------------------------------------------------------------------------------
+PURPOSE:
+  Simulates a faculty member scanning their Face ID / biometric for
+  their own daily attendance log.
+
+ALGORITHM / STEPS:
+  1. Get today's date (datetime.now().date())
+  2. Check if biometric already logged today (FacultyBiometricAttendance)
+       - If yes → return "already marked" message (idempotency)
+  3. Create FacultyBiometricAttendance(status="PRESENT", verified_by_user_id=None)
+     (Verification pending HOD/Admin)
+  4. db.commit() → return confirmation
+
+ALGORITHM USED:
+  - Idempotency Check (prevents double-marking on same day)
+  - Compound Unique Query: faculty_user_id + date (composite filter)
+
+--------------------------------------------------------------------------------
+FUNCTION 26: submit_leave(payload, current_faculty, db) -> dict
+  Route: POST /api/attendance/leave
+--------------------------------------------------------------------------------
+PURPOSE:
+  Faculty submits a leave application to HOD for approval.
+
+ALGORITHM / STEPS:
+  1. Create LeaveApplication(faculty_user_id, start_date, end_date, reason)
+     - status defaults to "PENDING"
+  2. db.add() → db.commit() → return confirmation
+
+ALGORITHM USED:
+  - Simple Insert with Default Status
+
+--------------------------------------------------------------------------------
+FUNCTION 27: submit_substitute(payload, current_faculty, db) -> dict
+  Route: POST /api/attendance/substitute
+--------------------------------------------------------------------------------
+PURPOSE:
+  Faculty requests a substitute for a specific date.
+
+ALGORITHM / STEPS:
+  1. Create SubstituteAssignment(original_faculty_id, date, reason, status="PENDING")
+  2. db.add() → db.commit() → return confirmation
+
+ALGORITHM USED:
+  - Simple Insert with Default Status
+
+--------------------------------------------------------------------------------
+FUNCTION 28: get_faculty_attendance_report(current_faculty, db) -> list
+  Route: GET /api/attendance/faculty/report
+--------------------------------------------------------------------------------
+PURPOSE:
+  Returns the logged-in faculty's biometric attendance history, sorted
+  newest-first.
+
+ALGORITHM / STEPS:
+  1. Query FacultyBiometricAttendance WHERE faculty_user_id == current_faculty.id
+  2. ORDER BY date DESC (descending sort — most recent first)
+  3. Map each record to dict: {date, status, verified (bool)}
+
+ALGORITHM USED:
+  - Indexed Filtered Query with ORDER BY (DB-side sort using date index)
+  - Boolean derivation: verified = (verified_by_user_id is not None)
+
+
+================================================================================
+  FILE: routers/faculty.py  (Faculty Self-Service API)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 29: read_faculty_profile(current_user, db) -> dict
+  Route: GET /api/faculty/me
+--------------------------------------------------------------------------------
+PURPOSE:
+  Returns the logged-in faculty's full profile information.
+
+ALGORITHM / STEPS:
+  1. Query FacultyProfile WHERE user_id == current_user.id → 404 if not found
+  2. Serialize profile fields (dates converted to ISO string)
+  3. Return comprehensive dict
+
+ALGORITHM USED:
+  - JWT Auth dependency (get_current_active_user)
+  - Single-row FK Lookup (user_id index)
+  - Conditional serialization: date fields converted via str() with None guard
+
+--------------------------------------------------------------------------------
+FUNCTION 30: read_faculty_timetable(current_user, db) -> list
+  Route: GET /api/faculty/timetable
+--------------------------------------------------------------------------------
+PURPOSE:
+  Returns all timetable slots assigned to the logged-in faculty.
+
+ALGORITHM / STEPS:
+  1. Query TimetableSlot WHERE faculty_id == current_user.id
+  2. Map day_of_week integer (0-6) to day name using lookup list:
+       days = ["Monday", "Tuesday", ..., "Sunday"]
+  3. Return formatted list with id, subject, day (string), period, year_of_study
+
+ALGORITHM USED:
+  - Integer-to-Label Lookup (index into days[] list)
+  - Bounds check: 0 <= day_of_week <= 6, else "Unknown"
+
+--------------------------------------------------------------------------------
+FUNCTION 31: read_announcements(current_user, db) -> list
+  Route: GET /api/faculty/announcements
+--------------------------------------------------------------------------------
+PURPOSE:
+  Returns all announcements relevant to the logged-in faculty —
+  global announcements AND announcements targeted to their department.
+
+ALGORITHM / STEPS:
+  1. Look up faculty's profile → get department_id → 404 if profile not found
+  2. Query Announcement with compound OR filter:
+       WHERE (target_department_id IS NULL)        ← global
+          OR (target_department_id == dept_id)     ← department-specific
+       AND is_active == True
+       ORDER BY date DESC
+  3. Serialize to list of dicts
+
+ALGORITHM USED:
+  - SQL OR-filter + AND-filter (compound WHERE clause)
+  - Descending Date Sort
+  - Null-check pattern for global vs targeted announcements
+  - strftime formatting for human-readable date output
+
+
+================================================================================
+  FILE: main.py  (Application Entry Point)
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION 32: serve_index(request) → GET /
+FUNCTION 33: serve_admin(request) → GET /admin
+FUNCTION 34: serve_hod(request) → GET /hod
+FUNCTION 35: serve_faculty(request) → GET /faculty
+--------------------------------------------------------------------------------
+PURPOSE:
+  Serve HTML pages from the Jinja2 templates directory.
+
+ALGORITHM:
+  - Jinja2 template rendering (server-side HTML injection)
+  - Static file mounting: /static → ./static directory
+
+--------------------------------------------------------------------------------
+FUNCTION 36: health_check() → GET /api/health
+--------------------------------------------------------------------------------
+PURPOSE:
+  Simple health check endpoint for load balancers / uptime monitors.
+
+ALGORITHM:
+  - Returns hardcoded JSON {"status": "ok", "app": "Kserve"}
+  - No DB calls (pure in-memory response)
+
+
+================================================================================
+  DATA MODELS SUMMARY (models.py)
+================================================================================
+
+| Model                     | Key Fields                                     |
+|---------------------------|------------------------------------------------|
+| User                      | id, username, password_hash, role, is_active   |
+| Department                | id, code, full_name                            |
+| FacultyProfile            | user_id(FK), faculty_id, full_name, dept_id    |
+| Student                   | id, urk_id, barcode(indexed), name, dept_id    |
+| IdSequence                | key(PK), last_value                            |
+| AuditLog                  | id, timestamp, user_id, action, entity         |
+| TimetableSlot             | faculty_id(FK), dept_id, year, subject, day    |
+| ClassAttendance           | date, period, slot_id(FK), student_id(FK)      |
+| FacultyBiometricAttendance| faculty_user_id, date, status, verified_by     |
+| LeaveApplication          | faculty_user_id, start_date, end_date, reason  |
+| SubstituteAssignment      | original_id, substitute_id, slot_id, date      |
+| Announcement              | title, content, target_dept_id, is_active      |
+
+
+================================================================================
+  ALGORITHMS MASTER SUMMARY
+================================================================================
+
+| Algorithm                    | Used In                                    |
+|------------------------------|--------------------------------------------|
+| HMAC-SHA256 (HS256 JWT)      | create_access_token, get_current_user      |
+| Bcrypt Adaptive Hashing      | login, faculty_signup, import_faculty      |
+| SELECT FOR UPDATE (Lock)     | get_next_sequence_number                   |
+| Sequential ID Generation     | generate_faculty_id, generate_student_id   |
+| Heuristic Date Parsing       | import_faculty_dataset (parse_date)        |
+| Case-Insensitive DB Matching | import_faculty (func.upper)                |
+| Idempotency Guard            | generate_daily, mark_faculty_biometric     |
+| Nested Loop (Cartesian)      | generate_daily_attendance_lists            |
+| B-tree Index Lookup          | scan_student_barcode (barcode column)      |
+| State Machine (Status)       | verify_faculty, scan_barcode               |
+| SQL OR-filter / compound     | read_announcements                         |
+| Streaming CSV Export         | export_attendance_csv (Pandas + StringIO)  |
+| DB Generator Session (RAII)  | get_db (yield pattern)                     |
+| Integer-to-Label Lookup      | read_faculty_timetable (days list)         |
+| Partial Rollback per Row     | import_faculty_dataset (try/except/continue)|
+| Base64URL JWT Encoding       | create_access_token (jose library)         |
+
+
+================================================================================
+  SECURITY ARCHITECTURE SUMMARY
+================================================================================
+
+  1. Passwords stored as Bcrypt hashes (adaptive, salted) — NEVER in plaintext
+  2. JWTs signed with HS256 (HMAC-SHA256) and expire in 24 hours
+  3. SECRET_KEY loaded from environment variable (not hardcoded in production)
+  4. Role-based access: ADMIN, HOD, FACULTY enforced via JWT 'role' claim
+  5. New faculty accounts are is_active=False until admin manually approves
+  6. AuditLog captures all admin actions with timestamps
+  7. Barcode-indexed lookup prevents unauthorized scan spoofing
+
+================================================================================
+  END OF DOCUMENT
+================================================================================
